@@ -4,7 +4,7 @@
 
 ## Chạy local
 
-Yêu cầu Node.js 20.9+ và Yarn 1.
+Yêu cầu Node.js 20.19+ (hoặc 22.13+/24+) và Yarn 1.
 
 ```bash
 yarn install

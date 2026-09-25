@@ -292,7 +292,7 @@ deploy() {
   require_root
   for tool in git tar mktemp node yarn curl install; do require_command "$tool"; done
   [[ $(yarn --version) == 1.* ]] || die "Yarn 1 is required"
-  node -e 'const v=process.versions.node.split(".").map(Number);process.exit(v[0]>20||(v[0]===20&&v[1]>=9)?0:1)' || die "Node.js 20.9+ is required"
+  node -e 'const [major, minor]=process.versions.node.split(".").map(Number);process.exit((major===20&&minor>=19)||(major===22&&minor>=13)||major>=24?0:1)' || die "Node.js 20.19+, 22.13+ or 24+ is required"
   mkdir -p "$RELEASES_DIR"
   acquire_lock
   load_env

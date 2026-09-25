@@ -4,11 +4,11 @@ Batam dùng `deploy/deploy.sh` để phát hành commit từ `origin/main`. Mỗ
 
 ## Chuẩn bị VPS (một lần)
 
-1. Cài Node.js 20.9+, Yarn 1, Git, Nginx, systemd, curl và `ss`. Tạo user `www-data` nếu máy chưa có. Cho VPS quyền đọc Git repository `https://github.com/nexhuber/batam.git` hoặc đặt `BATAM_GIT_URL`.
+1. Cài Node.js 20.19+ (hoặc 22.13+/24+), Yarn 1, Git, Nginx, systemd, curl và `ss`. Tạo user `www-data` nếu máy chưa có. Cho VPS quyền đọc Git repository `https://github.com/nexhuber/batam.git` hoặc đặt `BATAM_GIT_URL`.
 2. Tạo DNS cho domain Batam, rồi đăng ký chính xác `https://<domain>/auth/callback` trong Lark Custom App.
 3. Tạo `/var/www/html/batam/.env` trên VPS với `SESSION_SECRET`, `LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_REDIRECT_URI`, `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION`, `MONARCH_API_BASE_URL` và `BRAND_PIVOT_API_TOKEN`. File này nằm ngoài `releases/`, có quyền `600`. Nếu chưa có file, có thể truyền `BATAM_ENV_SOURCE=/path/to/trusted.env` trong lần deploy đầu; script chỉ nhập các biến Batam và đặt callback theo `BATAM_DOMAIN`.
 4. Nếu dùng `GOOGLE_APPLICATION_CREDENTIALS=./credentials/<file>.json`, đặt JSON tại `/var/www/html/batam/credentials/<file>.json`. Script chép file vào từng release với quyền hạn chế để `www-data` đọc. Đường dẫn tuyệt đối ngoài `releases/` cũng được hỗ trợ nếu `www-data` đọc được. Có thể để trống khi VPS đã có Application Default Credentials.
-5. Sau `--setup`, dùng template trong release đầu tiên để tạo Nginx site, thay `__DOMAIN__` và `__PORT__` bằng domain và `3105`. Chạy các lệnh sau trên VPS, rồi cấp HTTPS khi DNS sẵn sàng. Script deploy không sửa Nginx hoặc TLS; nếu site cũ còn trỏ cổng `3200`, đổi `proxy_pass` sang `3105` trước khi phát hành.
+5. Sau lần deploy đầu, dùng template trong release để tạo Nginx site, thay `__DOMAIN__` và `__PORT__` bằng domain và `3105`. Chạy các lệnh sau trên VPS, rồi cấp HTTPS khi DNS sẵn sàng. Script deploy không sửa Nginx hoặc TLS; nếu site cũ còn trỏ cổng `3200`, đổi `proxy_pass` sang `3105` trước khi phát hành.
 
 ```bash
 sed -e 's/__DOMAIN__/batam.example.com/g' -e 's/__PORT__/3105/g' /var/www/html/batam/current/deploy/nginx.conf.template \
@@ -20,15 +20,16 @@ sudo certbot --nginx --redirect -d batam.example.com
 
 ## Deploy lần đầu và các lần sau
 
-Nếu VPS chưa có checkout, chép script lên VPS rồi setup:
+Nếu VPS chưa có checkout, clone repo trên VPS rồi deploy (sau khi đã tạo `.env` như trên):
 
 ```bash
-scp deploy/deploy.sh user@vps:/tmp/batam-deploy.sh
 ssh user@vps
-sudo BATAM_DOMAIN='batam.example.com' bash /tmp/batam-deploy.sh --setup
+sudo mkdir -p /var/www/html/batam
+sudo git clone https://github.com/nexhuber/batam.git /var/www/html/batam/source
+sudo BATAM_DOMAIN='batam.example.com' bash /var/www/html/batam/source/deploy/deploy.sh
 ```
 
-`--setup` tạo bare repository tại `/var/www/html/batam/repo.git` nếu chưa có. Nếu đã clone Git tại `/var/www/html/batam` hoặc `/var/www/html/batam/source`, script dùng checkout đó. Mỗi lần deploy chỉ `fetch` và `archive` commit từ `origin/main`; không reset checkout hoặc lấy thay đổi chưa commit.
+Nếu repo đã nằm ngay tại `/var/www/html/batam`, chạy script tại đó thay cho đường dẫn `source`. Mỗi lần deploy chỉ `fetch` và `archive` commit từ `origin/main`; không reset checkout hoặc lấy thay đổi chưa commit.
 
 ```bash
 sudo BATAM_DOMAIN='batam.example.com' bash /var/www/html/batam/current/deploy/deploy.sh
