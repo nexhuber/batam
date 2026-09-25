@@ -1,6 +1,6 @@
-# Batam Dashboard skeleton
+# Batam News
 
-Một ứng dụng Next.js cho giao diện và server. Người dùng đăng nhập bằng Lark; server dùng Google BigQuery SDK chạy `SELECT 1 AS connection_ok` và hiển thị kết quả. Không có credentials BigQuery trong trình duyệt.
+Ứng dụng Next.js hiển thị lịch sử news từ BigQuery cho người dùng đăng nhập bằng Lark. News mới nhất ở trên cùng, có thể lọc theo loại, mở nội dung Markdown và cuộn để tải thêm. Credentials BigQuery chỉ nằm trên server.
 
 ## Chạy local
 
@@ -17,14 +17,15 @@ cp .env.local.example .env.local
 - `LARK_APP_ID`, `LARK_APP_SECRET`: thông tin Lark Custom App.
 - `LARK_REDIRECT_URI`: URL callback đăng ký trong Lark console; khi chạy local là `http://localhost:3000/auth/callback`.
 - `GOOGLE_APPLICATION_CREDENTIALS`: đường dẫn tuyệt đối tới service-account JSON. Có thể để trống nếu môi trường đã có Application Default Credentials (ADC).
-- `BQ_PROJECT`, `BQ_LOCATION`: Google Cloud project chạy query và BigQuery job location.
-- `BATAM_PORTFOLIO_FILE`: đường dẫn tuyệt đối tới `portfolio-quan-tri-gia.xlsx` mà Monarch đang dùng; tiến trình Batam cần quyền đọc file.
+- `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION`: Google Cloud project, dataset lưu news và BigQuery job location.
+- `MONARCH_API_BASE_URL`: origin Monarch (ví dụ `https://monarch.example.com`) dùng cho báo cáo tồn kho theo Brand.
+- `BRAND_PIVOT_API_TOKEN`: bearer token server-side, phải trùng với cấu hình trong Monarch.
 
 ```bash
 yarn dev
 ```
 
-Mở `http://localhost:3000`. Trang chính yêu cầu đăng nhập Lark. Sau khi đăng nhập, trang gọi BigQuery từ Next.js server và hiển thị `connection_ok = 1` khi query thành công. User đăng nhập thành công qua Lark app đều có thể vào; skeleton không có allowlist.
+Mở `http://localhost:3000`. Trang chính yêu cầu đăng nhập Lark, tải 10 news đầu tiên và các loại news hiện có từ BigQuery. News ẩn không được hiển thị. Khi cuộn xuống, trình duyệt gọi `GET /api/news?type=&cursor=` để tải từng lượt 10 news. Bộ lọc loại news và cursor được xử lý trên server. Người dùng đăng nhập thành công qua Lark app đều có thể vào; hiện không có allowlist.
 
 ## Kiểm tra source
 
@@ -34,21 +35,53 @@ yarn typecheck
 yarn build
 ```
 
-Lark app cần được cấu hình cho đăng nhập web và redirect URI phải khớp chính xác. Service account hoặc ADC cần quyền tạo BigQuery job trong `BQ_PROJECT` (ví dụ `bigquery.jobs.create`). Trang chính vẫn chỉ chạy `SELECT 1` để kiểm tra kết nối.
+Lark app cần được cấu hình cho đăng nhập web và redirect URI phải khớp chính xác. Service account hoặc ADC cần quyền tạo BigQuery job trong `BQ_PROJECT` (ví dụ `bigquery.jobs.create`) và quyền đọc bảng `news_history`.
 
 ## Báo cáo tồn kho theo Brand
 
-Gọi hai function server-side để lấy dữ liệu hai Chủ nhật gần nhất theo giờ Việt Nam và tạo bảng Markdown:
+Các function server-side nhận hai ngày snapshot cụ thể để so sánh. Helper weekly tự tính hai Chủ nhật gần nhất theo giờ Việt Nam:
 
 ```ts
-import { getLatestSundayBrandInventoryComparison } from "@/lib/weekly-brand-inventory";
-import { formatWeeklyBrandInventoryComparisonMarkdown } from "@/lib/weekly-brand-inventory-markdown";
+import { getBrandInventoryData, getWeeklyBrandInventoryData } from "@/lib/brand-inventory";
+import { formatBrandInventoryMarkdown } from "@/lib/brand-inventory-markdown";
 
-const data = await getLatestSundayBrandInventoryComparison();
-const markdown = formatWeeklyBrandInventoryComparisonMarkdown(data);
+const weeklyData = await getWeeklyBrandInventoryData();
+const weeklyMarkdown = formatBrandInventoryMarkdown(weeklyData);
+
+const customData = await getBrandInventoryData("2026-09-13", "2026-09-20", "week");
+const customMarkdown = formatBrandInventoryMarkdown(customData);
 ```
 
-Các function nằm trong `src/lib/weekly-brand-inventory.ts` và `src/lib/weekly-brand-inventory-markdown.ts`; không có trang hoặc API route mới. Mỗi kỳ là một ngày snapshot, không phải tổng các ngày trong tuần. Nếu thiếu snapshot Chủ nhật hoặc file Portfolio, function báo lỗi. Trên VPS, đặt `BATAM_PORTFOLIO_FILE` trong `/var/www/html/batam/.env` trỏ tới file Monarch lưu và cấp quyền đọc cho `www-data`.
+Các function nằm trong `src/lib/brand-inventory.ts` và `src/lib/brand-inventory-markdown.ts`; không có trang hoặc API route mới. Mỗi kỳ là một ngày snapshot, không phải tổng các ngày trong khoảng. Batam gọi API Brand × Kỳ của Monarch với đúng hai snapshot cần so sánh; Monarch dùng Portfolio Pricing làm nguồn Brand và giá vốn. Nếu thiếu snapshot, API không sẵn sàng hoặc cấu hình token sai, function báo lỗi thay vì thay ngày khác. Đặt `MONARCH_API_BASE_URL` và cùng một `BRAND_PIVOT_API_TOKEN` ở cả hai môi trường server.
+
+## Lưu lịch sử news
+
+Tạo dataset `news` ở cùng location với `BQ_LOCATION`, rồi chạy [schema SQL](sql/news_history.sql) một lần trong project `BQ_PROJECT`. Dataset và table không được đặt thời hạn tự xóa nếu cần giữ lịch sử lâu dài. Service account cần quyền `bigquery.jobs.create` trong project và `bigquery.tables.getData`, `bigquery.tables.updateData` trong dataset.
+
+```bash
+bq --project_id=YOUR_PROJECT mk --dataset --location=asia-southeast1 news
+bq --project_id=YOUR_PROJECT --location=asia-southeast1 query --use_legacy_sql=false < sql/news_history.sql
+```
+
+Sau khi tạo Markdown cho báo cáo weekly, lưu news bằng ngày Chủ nhật hiện tại làm khóa kỳ:
+
+```ts
+import { storeNews } from "@/lib/news";
+
+const { news, created } = await storeNews({
+  newsType: "weekly_brand_inventory",
+  periodKey: weeklyData.current_snapshot,
+  content: weeklyMarkdown,
+});
+```
+
+Để chạy toàn bộ bước lấy báo cáo, format và lưu đúng một news trên máy local, dùng `execute()` trong `src/lib/brand-inventory-markdown.ts` hoặc lệnh sau. Lệnh tự nạp `.env.local`/`.env`, yêu cầu đã tạo bảng và cấu hình Monarch cùng BigQuery:
+
+```bash
+yarn news:weekly
+```
+
+`storeNews` trả lại bản ghi cũ với `created: false` khi cron chạy lại cùng `newsType` và `periodKey`. Mỗi news mới có UUID, thời điểm tạo UTC và `is_hide=false`. Function chỉ chạy trên server; repo hiện chưa có cron để gọi tự động. BigQuery không thực thi ràng buộc unique, nên cron không nên chạy đồng thời với nhiều cấu hình ghi khác nhau cho cùng khóa kỳ.
 
 ## Deploy
 

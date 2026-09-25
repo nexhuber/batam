@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Batam Dashboard",
-  description: "Next.js, Lark SSO and BigQuery skeleton",
+  title: "Batam News",
+  description: "Dòng thời gian tin tức Batam",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
