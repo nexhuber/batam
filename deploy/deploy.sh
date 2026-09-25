@@ -309,7 +309,8 @@ deploy() {
   cp -R "$STAGE/." "$release/"
   copy_credentials "$release"
   log "Building $release_id"
-  ( cd "$release" && yarn install --frozen-lockfile --non-interactive && yarn build )
+  # Yarn 1 skips devDependencies when NODE_ENV=production; Next needs TypeScript to build.
+  ( cd "$release" && yarn install --production=false --frozen-lockfile --non-interactive && yarn build )
   if [[ $PM == systemd ]]; then
     chown -R www-data:www-data "$release"
     if [[ -n ${GOOGLE_APPLICATION_CREDENTIALS:-} && $GOOGLE_APPLICATION_CREDENTIALS != /* ]]; then
