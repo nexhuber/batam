@@ -1,0 +1,26 @@
+[Unit]
+Description=Batam Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=__APP_DIR__/current
+Environment=NODE_ENV=production
+Environment=PORT=__PORT__
+Environment=HOSTNAME=127.0.0.1
+EnvironmentFile=__APP_DIR__/.env
+ExecStart=__NODE_BIN__ __APP_DIR__/current/node_modules/next/dist/bin/next start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=batam-dashboard
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
