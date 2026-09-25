@@ -8,11 +8,12 @@ Yêu cầu Node.js 20.9+ và Yarn 1.
 
 ```bash
 yarn install
-cp .env.local.example .env.local
+cp .env.example .env.local
 ```
 
 Điền các biến trong `.env.local`:
 
+- `PORT`: cổng chạy local, mặc định 3000. Deploy VPS cấu hình riêng bằng `BATAM_PORT`.
 - `SESSION_SECRET`: khóa bí mật để ký OAuth state và session cookie; có thể tạo bằng `openssl rand -hex 32`.
 - `LARK_APP_ID`, `LARK_APP_SECRET`: thông tin Lark Custom App.
 - `LARK_REDIRECT_URI`: URL callback đăng ký trong Lark console; khi chạy local là `http://localhost:3000/auth/callback`.
