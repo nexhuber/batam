@@ -1,71 +1,56 @@
-# Deploy Batam trên VPS Ubuntu/Debian
+# Deploy Batam
 
-Batam chạy bằng systemd service `batam-dashboard` tại `127.0.0.1:3200`. Nginx dùng hostname riêng. Lệnh deploy từ Git và lệnh upload từ máy local đều gọi `install.sh`, nên dùng cùng quy trình build, health check, lịch sử và rollback.
+Batam dùng `deploy/deploy.sh` để phát hành commit từ `origin/main`. Mỗi bản được build trong `releases/` và kiểm tra tại cổng tạm trước khi chuyển symlink `current`. Service `batam-dashboard` chạy trên `127.0.0.1:3105`. Lần restart service có thể gây gián đoạn ngắn.
 
-## Chuẩn bị VPS
+## Chuẩn bị VPS (một lần)
 
-- Cài Node.js 20.9+, Yarn 1, Git, rsync, curl, Nginx, systemd, `ss`, user `www-data` và Certbot Nginx plugin.
-- Cho VPS quyền đọc `https://github.com/nexhuber/batam.git` (hoặc đặt `BATAM_GIT_URL` khi `--setup`).
-- Tạo DNS cho hostname Batam và đăng ký `https://<domain>/auth/callback` trong Lark Custom App.
-- Tạo `/var/www/html/batam/.env` trên VPS, ngoài thư mục release. Cần `SESSION_SECRET`, `LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_REDIRECT_URI`, `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION`, `MONARCH_API_BASE_URL` và `BRAND_PIVOT_API_TOKEN`. Nếu dùng service-account JSON, đặt `GOOGLE_APPLICATION_CREDENTIALS` là đường dẫn tuyệt đối ngoài `releases/`, đọc được bởi `www-data`. Redirect URI phải đúng `https://<domain>/auth/callback`.
+1. Cài Node.js 20.9+, Yarn 1, Git, Nginx, systemd, curl và `ss`. Tạo user `www-data` nếu máy chưa có. Cho VPS quyền đọc Git repository `https://github.com/nexhuber/batam.git` hoặc đặt `BATAM_GIT_URL`.
+2. Tạo DNS cho domain Batam, rồi đăng ký chính xác `https://<domain>/auth/callback` trong Lark Custom App.
+3. Tạo `/var/www/html/batam/.env` trên VPS với `SESSION_SECRET`, `LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_REDIRECT_URI`, `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION`, `MONARCH_API_BASE_URL` và `BRAND_PIVOT_API_TOKEN`. File này nằm ngoài `releases/`, có quyền `600`. Nếu chưa có file, có thể truyền `BATAM_ENV_SOURCE=/path/to/trusted.env` trong lần deploy đầu; script chỉ nhập các biến Batam và đặt callback theo `BATAM_DOMAIN`.
+4. Nếu dùng `GOOGLE_APPLICATION_CREDENTIALS=./credentials/<file>.json`, đặt JSON tại `/var/www/html/batam/credentials/<file>.json`. Script chép file vào từng release với quyền hạn chế để `www-data` đọc. Đường dẫn tuyệt đối ngoài `releases/` cũng được hỗ trợ nếu `www-data` đọc được. Có thể để trống khi VPS đã có Application Default Credentials.
+5. Sau `--setup`, dùng template trong release đầu tiên để tạo Nginx site, thay `__DOMAIN__` và `__PORT__` bằng domain và `3105`. Chạy các lệnh sau trên VPS, rồi cấp HTTPS khi DNS sẵn sàng. Script deploy không sửa Nginx hoặc TLS; nếu site cũ còn trỏ cổng `3200`, đổi `proxy_pass` sang `3105` trước khi phát hành.
 
-Có thể truyền `BATAM_ENV_SOURCE=/path/to/existing/.env` trong lần đầu nếu file nguồn có đủ **toàn bộ** biến cần thiết. Script chỉ sao chép biến Batam và tự đặt redirect URI; nó không sao chép `PORT` của ứng dụng khác.
+```bash
+sed -e 's/__DOMAIN__/batam.example.com/g' -e 's/__PORT__/3105/g' /var/www/html/batam/current/deploy/nginx.conf.template \
+  | sudo tee /etc/nginx/sites-available/batam-dashboard >/dev/null
+sudo ln -sfn /etc/nginx/sites-available/batam-dashboard /etc/nginx/sites-enabled/batam-dashboard
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx --redirect -d batam.example.com
+```
 
-## Deploy từ Git trên VPS
+## Deploy lần đầu và các lần sau
 
-Nếu đã clone repo vào `/var/www/html/batam`, tạo `.env` rồi chạy ngay `sudo BATAM_DOMAIN='batam.example.com' bash deploy/deploy.sh`. Không cần `--setup`; script nhận repo Git tại chính thư mục này. Nếu clone ở đường dẫn khác, đặt `BATAM_APP_DIR` bằng đường dẫn đó trong mọi lệnh deploy.
-
-Lần đầu, chép script từ máy local lên VPS, đăng nhập SSH, rồi chạy:
+Nếu VPS chưa có checkout, chép script lên VPS rồi setup:
 
 ```bash
 scp deploy/deploy.sh user@vps:/tmp/batam-deploy.sh
 ssh user@vps
-sudo BATAM_DOMAIN='batam.example.com' \
-  BATAM_GIT_URL='https://github.com/nexhuber/batam.git' \
-  bash /tmp/batam-deploy.sh --setup
+sudo BATAM_DOMAIN='batam.example.com' bash /tmp/batam-deploy.sh --setup
 ```
 
-Script clone repo dạng bare vào `/var/www/html/batam/repo.git` nếu chưa có checkout, fetch `origin/main`, tạo release từ đúng commit, cài bằng `yarn install --frozen-lockfile`, build rồi kiểm tra `/api/health` trên cổng tạm. Sau khi chuyển release, script kiểm tra lại service ở cổng 3200. Nó tự khôi phục release trước nếu restart, health check hoặc Nginx reload thất bại.
-
-Các lần sau chạy script trong release đang hoạt động trên VPS:
+`--setup` tạo bare repository tại `/var/www/html/batam/repo.git` nếu chưa có. Nếu đã clone Git tại `/var/www/html/batam` hoặc `/var/www/html/batam/source`, script dùng checkout đó. Mỗi lần deploy chỉ `fetch` và `archive` commit từ `origin/main`; không reset checkout hoặc lấy thay đổi chưa commit.
 
 ```bash
 sudo BATAM_DOMAIN='batam.example.com' bash /var/www/html/batam/current/deploy/deploy.sh
 bash /var/www/html/batam/current/deploy/deploy.sh --status
 bash /var/www/html/batam/current/deploy/deploy.sh --history
 bash /var/www/html/batam/current/deploy/deploy.sh --logs
-sudo bash /var/www/html/batam/current/deploy/deploy.sh --rollback
+sudo BATAM_DOMAIN='batam.example.com' bash /var/www/html/batam/current/deploy/deploy.sh --rollback
 ```
 
-`BATAM_APP_DIR` mặc định `/var/www/html/batam`, `BATAM_PORT` mặc định `3200`, `BATAM_GIT_BRANCH` mặc định `main`. `BATAM_KEEP_RELEASES` mặc định `5`; bản đang chạy và bản rollback luôn được giữ. `--rollback` dùng bản hoạt động ngay trước đó, rồi kiểm tra health và ghi lịch sử.
+`BATAM_APP_DIR` mặc định `/var/www/html/batam` trên Linux, `BATAM_PORT=3105`, `BATAM_GIT_BRANCH=main` và `BATAM_KEEP_RELEASES=5`. `--rollback` dùng release khỏe mạnh ngay trước đó và kiểm tra lại health. Script giữ cả release hiện tại lẫn release rollback khi dọn bản cũ. Nếu dùng đường dẫn `.env` khác, đặt `BATAM_ENV_FILE` nhất quán khi deploy; systemd unit sẽ trỏ tới file đó.
 
-Nginx config chỉ được tạo ở lần đầu để giữ chỉnh sửa TLS của Certbot. Khi DNS sẵn sàng, cấp HTTPS:
+## Chạy bằng nohup trên máy local
 
-```bash
-sudo certbot --nginx --redirect -d batam.example.com
-```
-
-## Deploy từ máy local
-
-`push.sh` vẫn upload source hiện tại, kể cả thay đổi chưa commit, qua SSH và gọi cùng `install.sh`. Dùng cách này khi cần phát hành bản chưa có trên Git remote:
-
-```bash
-DEPLOY_HOST='user@vps' \
-DEPLOY_DOMAIN='batam.example.com' \
-CERTBOT_EMAIL='admin@example.com' \
-bash deploy/push.sh
-```
-
-`DEPLOY_ENV_SOURCE` chỉ dùng nếu Batam chưa có `.env` trên server. `DEPLOY_TLS=0` bỏ bước Certbot và kiểm tra HTTPS trong lần thử HTTP đầu tiên.
+Trên macOS, script mặc định dùng `nohup` và thư mục project hiện tại. Tạo `.env` riêng cho quy trình release (có thể sao chép cấu hình từ `.env.local`), đặt Lark callback phù hợp và chạy `bash deploy/deploy.sh`. Có thể chọn `BATAM_PM=nohup` trên Linux. Script vẫn lấy `origin/main`; `yarn dev` dùng `.env.local` và không phụ thuộc quy trình deploy này.
 
 ## Kiểm tra sau deploy
 
 ```bash
 sudo systemctl status batam-dashboard --no-pager
 sudo journalctl -u batam-dashboard -n 100 --no-pager
-curl -fsS http://127.0.0.1:3200/api/health
-sudo nginx -t
+curl -fsS http://127.0.0.1:3105/api/health
 curl -fsS https://batam.example.com/api/health
 ```
 
-Health check chỉ xác nhận Next.js chạy. Cần kiểm tra đăng nhập Lark, truy vấn BigQuery và gọi API Monarch riêng trên giao diện. Deploy không tạo cron cho `news:weekly`.
+Health check chỉ xác nhận Next.js chạy. Kiểm tra thêm đăng nhập Lark, truy vấn BigQuery và API Monarch trên giao diện. Script không tạo cron cho `news:weekly`.

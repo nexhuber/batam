@@ -7,3 +7,13 @@ out/
 credentials/*.json
 *.tsbuildinfo
 .DS_Store
+releases/
+current
+previous
+.pid
+.service.log
+.preflight.log
+.deploy.log
+.deploy_history
+.deploy.lock/
+.current-*

@@ -1,3 +1,5 @@
+# Install once as an Nginx site after replacing __DOMAIN__ and __PORT__.
+# deploy.sh does not modify this file or manage Certbot certificates.
 server {
     listen 80;
     listen [::]:80;

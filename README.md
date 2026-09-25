@@ -13,11 +13,11 @@ cp .env.example .env.local
 
 Điền các biến trong `.env.local`:
 
-- `PORT`: cổng chạy local, mặc định 3000. Deploy VPS cấu hình riêng bằng `BATAM_PORT`.
+- `PORT`: cổng chạy local, mặc định 3105. Deploy VPS cấu hình riêng bằng `BATAM_PORT`.
 - `SESSION_SECRET`: khóa bí mật để ký OAuth state và session cookie; có thể tạo bằng `openssl rand -hex 32`.
 - `LARK_APP_ID`, `LARK_APP_SECRET`: thông tin Lark Custom App.
-- `LARK_REDIRECT_URI`: URL callback đăng ký trong Lark console; khi chạy local là `http://localhost:3000/auth/callback`.
-- `GOOGLE_APPLICATION_CREDENTIALS`: đường dẫn tuyệt đối tới service-account JSON. Có thể để trống nếu môi trường đã có Application Default Credentials (ADC).
+- `LARK_REDIRECT_URI`: URL callback đăng ký trong Lark console; khi chạy local là `http://localhost:3105/auth/callback`.
+- `GOOGLE_APPLICATION_CREDENTIALS`: đường dẫn `./credentials/<file>.json` hoặc đường dẫn tuyệt đối tới service-account JSON. Có thể để trống nếu môi trường đã có Application Default Credentials (ADC).
 - `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION`: Google Cloud project, dataset lưu news và BigQuery job location.
 - `MONARCH_API_BASE_URL`: origin Monarch (ví dụ `https://monarch.example.com`) dùng cho báo cáo tồn kho theo Brand.
 - `BRAND_PIVOT_API_TOKEN`: bearer token server-side, phải trùng với cấu hình trong Monarch.
@@ -26,7 +26,7 @@ cp .env.example .env.local
 yarn dev
 ```
 
-Mở `http://localhost:3000`. Trang chính yêu cầu đăng nhập Lark, tải 10 news đầu tiên và các loại news hiện có từ BigQuery. News ẩn không được hiển thị. Khi cuộn xuống, trình duyệt gọi `GET /api/news?type=&cursor=` để tải từng lượt 10 news. Bộ lọc loại news và cursor được xử lý trên server. Người dùng đăng nhập thành công qua Lark app đều có thể vào; hiện không có allowlist.
+Mở `http://localhost:3105`. Trang chính yêu cầu đăng nhập Lark, tải 10 news đầu tiên và các loại news hiện có từ BigQuery. News ẩn không được hiển thị. Khi cuộn xuống, trình duyệt gọi `GET /api/news?type=&cursor=` để tải từng lượt 10 news. Bộ lọc loại news và cursor được xử lý trên server. Người dùng đăng nhập thành công qua Lark app đều có thể vào; hiện không có allowlist.
 
 ## Kiểm tra source
 
@@ -86,4 +86,4 @@ yarn news:weekly
 
 ## Deploy
 
-Nginx, systemd và script deploy VPS nằm trong [deploy/README.md](deploy/README.md). Batam dùng một service và cổng riêng, mặc định `127.0.0.1:3200`.
+Nginx, systemd và script deploy VPS nằm trong [deploy/README.md](deploy/README.md). Batam dùng một service và cổng riêng, mặc định `127.0.0.1:3105`.

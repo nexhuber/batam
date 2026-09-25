@@ -1,119 +1,408 @@
 #!/usr/bin/env bash
-# Deploy Batam from Git on the VPS. Uploads through push.sh share install.sh.
+# Batam release manager. Build a fetched Git commit before switching the service.
 set -euo pipefail
 
-APP_DIR="${BATAM_APP_DIR:-/var/www/html/batam}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+if [[ ${PROJECT_DIR##*/} == current && -L $PROJECT_DIR ]]; then
+  PROJECT_DIR="$(dirname "$PROJECT_DIR")"
+fi
+if [[ $(uname) == Linux ]] && command -v systemctl >/dev/null 2>&1; then
+  DEFAULT_PM=systemd
+  DEFAULT_APP_DIR=/var/www/html/batam
+else
+  DEFAULT_PM='nohup'
+  DEFAULT_APP_DIR="$PROJECT_DIR"
+fi
+
+PM="${BATAM_PM:-$DEFAULT_PM}"
+APP_DIR="${BATAM_APP_DIR:-$DEFAULT_APP_DIR}"
 REPO_URL="${BATAM_GIT_URL:-https://github.com/nexhuber/batam.git}"
 BRANCH="${BATAM_GIT_BRANCH:-main}"
-PORT="${BATAM_PORT:-3200}"
+PORT="${BATAM_PORT:-3105}"
+KEEP_RELEASES="${BATAM_KEEP_RELEASES:-5}"
 SERVICE=batam-dashboard
+RELEASES_DIR="$APP_DIR/releases"
+CURRENT_LINK="$APP_DIR/current"
+PREVIOUS_LINK="$APP_DIR/previous"
+ENV_FILE="${BATAM_ENV_FILE:-$APP_DIR/.env}"
+SYSTEMD_DIR="${BATAM_SYSTEMD_DIR:-/etc/systemd/system}"
+HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
+STAGE=""
+TEST_PID=""
+LOCK_DIR=""
 
 usage() {
   cat <<'EOF'
-Batam deploy on VPS
-Usage: sudo BATAM_DOMAIN=your.domain deploy/deploy.sh [command]
+Batam Deploy
+Usage: deploy/deploy.sh [command]
 
-  (no command)   Fetch origin/main and deploy a new release
-  --setup        Clone the Git repository if needed, then deploy
+  (no command)   Fetch origin/main and deploy a release
+  --setup        Clone the repository if needed, then deploy
   --rollback     Restore the previous healthy release
-  --status       Show active release, service and health
-  --history      Show recent deploy and rollback records
-  --logs         Show recent systemd logs
+  --status       Show release, process and health
+  --history      Show recent deployment records
+  --logs         Show deploy and service logs
   -h, --help     Show this help
 
-Defaults: BATAM_APP_DIR=/var/www/html/batam, BATAM_PORT=3200,
-          BATAM_GIT_BRANCH=main, BATAM_GIT_URL=https://github.com/nexhuber/batam.git
-Set BATAM_ENV_SOURCE only for the first deploy if Batam .env does not exist.
+VPS defaults: BATAM_APP_DIR=/var/www/html/batam, BATAM_PM=systemd.
+Local defaults: BATAM_APP_DIR=the project directory, BATAM_PM=nohup.
+Both use BATAM_PORT=3105, BATAM_GIT_BRANCH=main and BATAM_KEEP_RELEASES=5.
+On the VPS, set BATAM_DOMAIN for the Lark callback check and prepare .env.
+Nginx and TLS are configured separately; see deploy/README.md.
 EOF
 }
-die() { echo "$*" >&2; exit 1; }
-root_required() { [[ $EUID -eq 0 ]] || die "Run this command with sudo"; }
-current() {
-  if [[ -L $APP_DIR/current ]]; then readlink -f "$APP_DIR/current"; fi
+
+die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+log() {
+  local line
+  line="[$(date '+%H:%M:%S')] $*"
+  printf '%s\n' "$line"
+  [[ -d $APP_DIR ]] && printf '%s\n' "$line" >> "$APP_DIR/.deploy.log"
 }
-healthy() {
-  local i
-  for i in {1..20}; do
-    if curl --fail --silent "http://127.0.0.1:${PORT}/api/health" | grep -q '"status":"ok"'; then return 0; fi
+require_root() { [[ $PM != systemd || $EUID -eq 0 ]] || die "Run systemd commands with sudo"; }
+require_command() { command -v "$1" >/dev/null 2>&1 || die "Missing $1"; }
+
+acquire_lock() {
+  [[ -n $LOCK_DIR ]] && return 0
+  local path="$APP_DIR/.deploy.lock"
+  mkdir "$path" 2>/dev/null || die "Another deploy may be running; inspect $path before removing it"
+  LOCK_DIR="$path"
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+}
+
+validate_config() {
+  [[ $PM == systemd || $PM == nohup ]] || die "BATAM_PM must be systemd or nohup"
+  [[ $APP_DIR == /* && $APP_DIR != / ]] || die "BATAM_APP_DIR must be an absolute directory"
+  [[ $BRANCH =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ && $BRANCH != *..* ]] || die "Invalid BATAM_GIT_BRANCH"
+  if [[ ! $PORT =~ ^[0-9]+$ ]] || (( PORT < 1024 || PORT > 64535 )); then die "BATAM_PORT must be 1024..64535"; fi
+  if [[ ! $KEEP_RELEASES =~ ^[0-9]+$ ]] || (( KEEP_RELEASES < 2 )); then die "BATAM_KEEP_RELEASES must be at least 2"; fi
+  if [[ -n ${BATAM_DOMAIN:-} ]]; then
+    [[ $BATAM_DOMAIN =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]] || die "Invalid BATAM_DOMAIN"
+  fi
+}
+
+release_path() {
+  [[ -L $1 ]] || return 0
+  local target release_root
+  target="$(readlink -f "$1")" || return 1
+  release_root="$(readlink -f "$RELEASES_DIR")" || return 1
+  [[ $target == "$release_root/"* && -d $target ]] || die "Invalid release link: $1"
+  printf '%s\n' "$target"
+}
+
+switch_to() {
+  local temporary="$APP_DIR/.current-$$"
+  ln -s "$1" "$temporary"
+  if [[ $(uname) == Darwin ]]; then
+    mv -fh "$temporary" "$CURRENT_LINK"
+  else
+    mv -Tf "$temporary" "$CURRENT_LINK"
+  fi
+}
+
+record() { printf '%s,%s,%s,%s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$3" >> "$APP_DIR/.deploy_history"; }
+
+repository() {
+  if [[ -d $APP_DIR/repo.git ]]; then
+    printf '%s\n' "$APP_DIR/repo.git"
+  elif [[ -d $APP_DIR/source/.git ]]; then
+    printf '%s\n' "$APP_DIR/source"
+  elif [[ -d $APP_DIR/.git ]]; then
+    printf '%s\n' "$APP_DIR"
+  else
+    die "No Git repository in $APP_DIR; run --setup"
+  fi
+}
+
+load_env() {
+  if [[ ! -f $ENV_FILE ]]; then
+    [[ -n ${BATAM_ENV_SOURCE:-} && -f ${BATAM_ENV_SOURCE:-} ]] || die "Create $ENV_FILE or set BATAM_ENV_SOURCE"
+    local temporary
+    umask 077
+    temporary="$(mktemp "$APP_DIR/.env.tmp.XXXXXXXX")"
+    if ! (
+      # The source is a trusted server-side shell env file. Copy only Batam keys.
+      # shellcheck disable=SC1090
+      source "$BATAM_ENV_SOURCE"
+      for key in SESSION_SECRET LARK_APP_ID LARK_APP_SECRET BQ_PROJECT BQ_DATASET BQ_LOCATION MONARCH_API_BASE_URL BRAND_PIVOT_API_TOKEN; do
+        [[ -n ${!key:-} ]] || { printf 'Missing %s in BATAM_ENV_SOURCE\n' "$key" >&2; exit 1; }
+        printf '%s=%q\n' "$key" "${!key}"
+      done
+      [[ -n ${BATAM_DOMAIN:-} ]] || { printf 'BATAM_DOMAIN is required when importing an env file\n' >&2; exit 1; }
+      printf 'LARK_REDIRECT_URI=%q\n' "https://${BATAM_DOMAIN}/auth/callback"
+      for key in GOOGLE_APPLICATION_CREDENTIALS LARK_BASE_URL; do
+        if [[ -n ${!key:-} ]]; then printf '%s=%q\n' "$key" "${!key}"; fi
+      done
+    ) > "$temporary"; then
+      rm -f "$temporary"
+      die "Could not import BATAM_ENV_SOURCE"
+    fi
+    mv "$temporary" "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  export PORT="$PORT" NODE_ENV=production
+  for key in SESSION_SECRET LARK_APP_ID LARK_APP_SECRET LARK_REDIRECT_URI BQ_PROJECT BQ_DATASET BQ_LOCATION MONARCH_API_BASE_URL BRAND_PIVOT_API_TOKEN; do
+    [[ -n ${!key:-} ]] || die "Missing $key in $ENV_FILE"
+  done
+  if [[ $PM == systemd ]]; then
+    [[ -n ${BATAM_DOMAIN:-} ]] || die "Set BATAM_DOMAIN to Batam's public hostname"
+    [[ $LARK_REDIRECT_URI == "https://${BATAM_DOMAIN}/auth/callback" ]] || die "LARK_REDIRECT_URI must equal https://${BATAM_DOMAIN}/auth/callback"
+  fi
+}
+
+copy_credentials() {
+  [[ -n ${GOOGLE_APPLICATION_CREDENTIALS:-} ]] || return 0
+  if [[ $GOOGLE_APPLICATION_CREDENTIALS == /* ]]; then
+    [[ -r $GOOGLE_APPLICATION_CREDENTIALS ]] || die "Credential file is unreadable: $GOOGLE_APPLICATION_CREDENTIALS"
+    local credential_real release_root
+    credential_real="$(readlink -f "$GOOGLE_APPLICATION_CREDENTIALS")"
+    release_root="$(readlink -f "$RELEASES_DIR")"
+    [[ $credential_real != "$release_root/"* ]] || die "Credentials must be outside releases"
+    if [[ $PM == systemd ]]; then
+      sudo -u www-data test -r "$GOOGLE_APPLICATION_CREDENTIALS" || die "Credential file is unreadable by www-data"
+    fi
+    return 0
+  fi
+  [[ $GOOGLE_APPLICATION_CREDENTIALS =~ ^(\./)?credentials/[a-zA-Z0-9][a-zA-Z0-9._-]*\.json$ ]] || die "Relative credentials must be ./credentials/<file>.json"
+  local name="${GOOGLE_APPLICATION_CREDENTIALS##*/}"
+  [[ -f $APP_DIR/credentials/$name && -r $APP_DIR/credentials/$name ]] || die "Missing credential file: $APP_DIR/credentials/$name"
+  install -d -m 750 "$1/credentials"
+  install -m 600 "$APP_DIR/credentials/$name" "$1/credentials/$name"
+}
+
+port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "( sport = :$1 )" | grep -qvE '^(State|Netid)'
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN -t >/dev/null 2>&1
+  else
+    die "Install ss or lsof to check port availability"
+  fi
+}
+
+health_check() {
+  local port="$1" attempts="${2:-20}" i
+  for (( i=0; i<attempts; i++ )); do
+    if curl --fail --silent --max-time 2 "http://127.0.0.1:${port}/api/health" | grep -q '"status":"ok"'; then return 0; fi
     sleep 2
   done
   return 1
 }
-switch_to() {
-  ln -sfn "$1" "$APP_DIR/current.new"
-  mv -Tf "$APP_DIR/current.new" "$APP_DIR/current"
-}
-repository() {
-  if [[ -d $APP_DIR/repo.git ]]; then
-    echo "$APP_DIR/repo.git"
-  elif [[ -d $APP_DIR/source/.git ]]; then
-    echo "$APP_DIR/source"
-  elif [[ -d $APP_DIR/.git ]]; then
-    echo "$APP_DIR"
+
+service_running() {
+  if [[ $PM == systemd ]]; then
+    systemctl is-active --quiet "$SERVICE"
+  elif [[ -f $APP_DIR/.pid ]]; then
+    kill -0 "$(cat "$APP_DIR/.pid")" 2>/dev/null
   else
-    die "No VPS Git repository found; run --setup or set up origin in $APP_DIR/source"
+    return 1
   fi
 }
-deploy() {
-  root_required
-  [[ -n ${BATAM_DOMAIN:-} ]] || die "Set BATAM_DOMAIN to Batam's public hostname"
-  for tool in git tar mktemp; do command -v "$tool" >/dev/null || die "Missing $tool"; done
-  local repo stage commit release_id
-  repo="$(repository)"
-  git -C "$repo" fetch origin "$BRANCH"
-  commit="$(git -C "$repo" rev-parse --verify FETCH_HEAD^{commit})"
-  release_id="$(date -u +%Y%m%dT%H%M%SZ)-${commit:0:8}"
-  stage="$(mktemp -d /tmp/batam-git.XXXXXXXX)"
-  trap "rm -rf -- '$stage'" EXIT
-  git -C "$repo" archive "$commit" | tar -x -C "$stage"
-  BATAM_RELEASE_ID="$release_id" bash "$stage/deploy/install.sh" "$stage"
-  echo "Deployed Git commit $commit"
+
+service_stop() {
+  if [[ $PM == systemd ]]; then
+    systemctl stop "$SERVICE"
+  elif [[ -f $APP_DIR/.pid ]]; then
+    local pid
+    pid="$(cat "$APP_DIR/.pid")"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid"
+      for _ in {1..10}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      if kill -0 "$pid" 2>/dev/null; then
+        printf 'Local process %s did not stop\n' "$pid" >&2
+        return 1
+      fi
+    fi
+    rm -f "$APP_DIR/.pid"
+  fi
 }
+
+service_start() {
+  if [[ $PM == systemd ]]; then
+    systemctl restart "$SERVICE"
+  else
+    local node_bin
+    service_stop || return 1
+    node_bin="$(command -v node)"
+    ( cd "$CURRENT_LINK" && exec nohup "$node_bin" node_modules/next/dist/bin/next start -p "$PORT" -H 127.0.0.1 > "$APP_DIR/.service.log" 2>&1 ) &
+    printf '%s\n' "$!" > "$APP_DIR/.pid"
+  fi
+}
+
+install_service() {
+  [[ $PM == systemd ]] || return 0
+  [[ -d $SYSTEMD_DIR ]] || die "Missing systemd unit directory: $SYSTEMD_DIR"
+  id www-data >/dev/null || die "Missing www-data user"
+  local node_bin
+  node_bin="$(command -v node)"
+  sudo -u www-data "$node_bin" --version >/dev/null || die "Node.js is not executable by www-data"
+  sed -e "s|__APP_DIR__|$APP_DIR|g" -e "s|__ENV_FILE__|$ENV_FILE|g" \
+      -e "s|__PORT__|$PORT|g" -e "s|__NODE_BIN__|$node_bin|g" \
+      "$1/deploy/batam-dashboard.service.template" > "$SYSTEMD_DIR/$SERVICE.service"
+  systemctl daemon-reload
+  systemctl enable "$SERVICE"
+}
+
+stop_test() {
+  if [[ -n $TEST_PID ]]; then
+    kill "$TEST_PID" 2>/dev/null || true
+    wait "$TEST_PID" 2>/dev/null || true
+    TEST_PID=""
+  fi
+}
+
+cleanup() {
+  stop_test
+  if [[ -n $STAGE ]]; then rm -rf -- "$STAGE"; fi
+  if [[ -n $LOCK_DIR ]]; then rm -rf -- "$LOCK_DIR"; fi
+}
+trap cleanup EXIT
+
+preflight_release() {
+  local release="$1" test_port=$((PORT + 1000)) node_bin
+  port_in_use "$test_port" && die "Temporary health-check port $test_port is occupied"
+  node_bin="$(command -v node)"
+  ( cd "$release" && exec "$node_bin" node_modules/next/dist/bin/next start -p "$test_port" -H 127.0.0.1 > "$APP_DIR/.preflight.log" 2>&1 ) &
+  TEST_PID=$!
+  if ! health_check "$test_port" 15; then
+    die "Pre-deploy health check failed; see $APP_DIR/.preflight.log"
+  fi
+  stop_test
+}
+
+cleanup_releases() {
+  local current previous kept=0 protected=1 candidate candidate_real
+  current="$(release_path "$CURRENT_LINK")"
+  previous="$(release_path "$PREVIOUS_LINK")"
+  [[ -n $previous && $previous != "$current" ]] && protected=2
+  while IFS= read -r candidate; do
+    candidate_real="$(readlink -f "$candidate")"
+    [[ $candidate_real == "$current" || $candidate_real == "$previous" ]] && continue
+    kept=$((kept + 1))
+    if (( kept > KEEP_RELEASES - protected )); then rm -rf -- "$candidate"; fi
+  done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d | sort -r)
+}
+
+deploy() {
+  require_root
+  for tool in git tar mktemp node yarn curl install; do require_command "$tool"; done
+  [[ $(yarn --version) == 1.* ]] || die "Yarn 1 is required"
+  node -e 'const v=process.versions.node.split(".").map(Number);process.exit(v[0]>20||(v[0]===20&&v[1]>=9)?0:1)' || die "Node.js 20.9+ is required"
+  mkdir -p "$RELEASES_DIR"
+  acquire_lock
+  load_env
+  local repo commit release_id release previous
+  repo="$(repository)"
+  log "Fetching origin/$BRANCH"
+  git -C "$repo" fetch origin "$BRANCH"
+  commit="$(git -C "$repo" rev-parse --verify 'FETCH_HEAD^{commit}')"
+  STAGE="$(mktemp -d "${TMPDIR:-/tmp}/batam-git.XXXXXXXX")"
+  git -C "$repo" archive "$commit" | tar -x -C "$STAGE"
+  [[ -f $STAGE/yarn.lock && -f $STAGE/deploy/batam-dashboard.service.template ]] || die "Fetched commit lacks deployment files"
+  release="$(mktemp -d "$RELEASES_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${commit:0:8}.XXXXXX")"
+  release_id="${release##*/}"
+  cp -R "$STAGE/." "$release/"
+  copy_credentials "$release"
+  log "Building $release_id"
+  ( cd "$release" && yarn install --frozen-lockfile --non-interactive && yarn build )
+  if [[ $PM == systemd ]]; then
+    chown -R www-data:www-data "$release"
+    if [[ -n ${GOOGLE_APPLICATION_CREDENTIALS:-} && $GOOGLE_APPLICATION_CREDENTIALS != /* ]]; then
+      sudo -u www-data test -r "$release/$GOOGLE_APPLICATION_CREDENTIALS" || die "Credentials are unreadable by www-data"
+    fi
+  fi
+  preflight_release "$release"
+  previous="$(release_path "$CURRENT_LINK")"
+  if port_in_use "$PORT" && ! service_running; then die "Port $PORT belongs to another process"; fi
+  install_service "$release"
+  log "Switching to $release_id"
+  switch_to "$release"
+  if ! service_start || ! health_check "$PORT"; then
+    log "New release failed; restoring previous release"
+    if [[ -n $previous ]]; then
+      switch_to "$previous"
+      service_start || true
+      health_check "$PORT" || log "Previous release also failed health check"
+    else
+      service_stop || true
+      rm -f "$CURRENT_LINK"
+    fi
+    record failed "$release_id" "${previous##*/}"
+    die "Deploy failed; inspect --logs"
+  fi
+  if [[ -n $previous ]]; then ln -sfn "$previous" "$PREVIOUS_LINK"; fi
+  record deploy "$release_id" "${previous##*/}"
+  cleanup_releases
+  log "Deployed $release_id ($commit) at $HEALTH_URL"
+}
+
 setup() {
-  root_required
+  require_root
+  mkdir -p "$APP_DIR"
+  acquire_lock
   if [[ ! -d $APP_DIR/repo.git && ! -d $APP_DIR/source/.git && ! -d $APP_DIR/.git ]]; then
-    mkdir -p "$APP_DIR"
+    require_command git
     git clone --bare "$REPO_URL" "$APP_DIR/repo.git"
   fi
   deploy
 }
+
 rollback() {
-  root_required
-  local previous before
-  [[ -L $APP_DIR/previous ]] || die "No previous release available"
-  previous="$(readlink -f "$APP_DIR/previous")"
-  before="$(current)"
-  [[ -n $before && -d $previous && $previous == "$APP_DIR/releases/"* ]] || die "Rollback target is missing or invalid"
-  [[ $previous != $before ]] || die "Previous release is already active"
-  switch_to "$previous"
-  if ! systemctl restart "$SERVICE" || ! healthy; then
+  require_root
+  acquire_lock
+  local target before
+  target="$(release_path "$PREVIOUS_LINK")"
+  before="$(release_path "$CURRENT_LINK")"
+  [[ -n $target && -n $before && $target != "$before" ]] || die "No previous release available"
+  load_env
+  switch_to "$target"
+  if ! service_start || ! health_check "$PORT"; then
     switch_to "$before"
-    systemctl restart "$SERVICE" || true
-    healthy || echo "Original release health check failed; inspect journalctl -u $SERVICE" >&2
-    die "Rollback failed; restored $before"
+    service_start || true
+    health_check "$PORT" || log "Original release also failed health check"
+    die "Rollback failed; restored ${before##*/}"
   fi
-  ln -sfn "$before" "$APP_DIR/previous"
-  printf '%s,rollback,%s,%s\n' "$(date -u +%FT%TZ)" "${previous##*/}" "${before##*/}" >> "$APP_DIR/.deploy_history"
-  echo "Rolled back to ${previous##*/}"
+  ln -sfn "$before" "$PREVIOUS_LINK"
+  record rollback "${target##*/}" "${before##*/}"
+  log "Rolled back to ${target##*/}"
 }
+
 status() {
-  echo "Current: ${APP_DIR}/current -> $(current)"
-  if [[ -L $APP_DIR/previous ]]; then echo "Previous: $(readlink -f "$APP_DIR/previous")"; fi
-  if command -v systemctl >/dev/null && systemctl is-active --quiet "$SERVICE"; then echo "Service: active"; else echo "Service: inactive"; fi
-  if curl --fail --silent "http://127.0.0.1:${PORT}/api/health" | grep -q '"status":"ok"'; then
-    echo "Health: ok (127.0.0.1:$PORT)"
+  printf 'Current: %s\n' "$(release_path "$CURRENT_LINK")"
+  printf 'Previous: %s\n' "$(release_path "$PREVIOUS_LINK")"
+  printf 'Port: %s\nProcess manager: %s\n' "$PORT" "$PM"
+  if service_running; then printf 'Service: active\n'; else printf 'Service: inactive\n'; fi
+  if curl --fail --silent --max-time 2 "$HEALTH_URL" | grep -q '"status":"ok"'; then
+    printf 'Health: ok (%s)\n' "$HEALTH_URL"
   else
-    echo "Health: failed (127.0.0.1:$PORT)"
+    printf 'Health: failed (%s)\n' "$HEALTH_URL"
   fi
 }
 
+logs() {
+  if [[ -f $APP_DIR/.deploy.log ]]; then tail -n 50 "$APP_DIR/.deploy.log"; fi
+  if [[ $PM == systemd ]]; then
+    journalctl -u "$SERVICE" -n 50 --no-pager
+  elif [[ -f $APP_DIR/.service.log ]]; then
+    tail -n 50 "$APP_DIR/.service.log"
+  else
+    printf 'No service log yet\n'
+  fi
+}
+
+validate_config
 case "${1:-}" in
-  "") deploy ;;
+  '') deploy ;;
   --setup) setup ;;
   --rollback) rollback ;;
   --status) status ;;
-  --history) if [[ -f $APP_DIR/.deploy_history ]]; then tail -n 20 "$APP_DIR/.deploy_history"; else echo "No deployment history"; fi ;;
-  --logs) journalctl -u "$SERVICE" -n 50 --no-pager ;;
+  --history) if [[ -f $APP_DIR/.deploy_history ]]; then tail -n 20 "$APP_DIR/.deploy_history"; else printf 'No deployment history\n'; fi ;;
+  --logs) logs ;;
   -h|--help|help) usage ;;
   *) die "Unknown option: $1" ;;
 esac

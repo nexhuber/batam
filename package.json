@@ -4,9 +4,9 @@
   "private": true,
   "packageManager": "yarn@1.22.22",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p ${PORT:-3105}",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-3105}",
     "news:weekly": "node --conditions=react-server --import=tsx scripts/create-weekly-news.ts",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
