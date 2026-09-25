@@ -1,5 +1,5 @@
-# Install once as an Nginx site after replacing __DOMAIN__ and __PORT__.
-# deploy.sh does not modify this file or manage Certbot certificates.
+# deploy.sh renders this template once for a new Batam site.
+# Certbot adds HTTPS settings to the installed site; later deploys retain them.
 server {
     listen 80;
     listen [::]:80;
