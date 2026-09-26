@@ -24,14 +24,11 @@ PORT="${BATAM_PORT:-3105}"
 KEEP_RELEASES="${BATAM_KEEP_RELEASES:-5}"
 SERVICE=batam
 LEGACY_SERVICE=batam-dashboard
-NGINX_SITE=batam-dashboard
 RELEASES_DIR="$APP_DIR/releases"
 CURRENT_LINK="$APP_DIR/current"
 PREVIOUS_LINK="$APP_DIR/previous"
 ENV_FILE="${BATAM_ENV_FILE:-$APP_DIR/.env}"
 SYSTEMD_DIR="${BATAM_SYSTEMD_DIR:-/etc/systemd/system}"
-NGINX_AVAILABLE="${BATAM_NGINX_AVAILABLE:-/etc/nginx/sites-available}"
-NGINX_ENABLED="${BATAM_NGINX_ENABLED:-/etc/nginx/sites-enabled}"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 STAGE=""
 TEST_PID=""
@@ -49,14 +46,13 @@ Usage: deploy/deploy.sh [command]
   --history      Show recent deployment records
   --logs         Show deploy and service logs
   --setup-cron   Synchronize Linux cron with the current release
-  --configure-web  Configure Nginx and HTTPS for the current release
   -h, --help     Show this help
 
 VPS defaults: BATAM_APP_DIR=/var/www/html/batam, BATAM_PM=systemd.
 Local defaults: BATAM_APP_DIR=the project directory, BATAM_PM=nohup.
 Both use BATAM_PORT=3105, BATAM_GIT_BRANCH=main and BATAM_KEEP_RELEASES=5.
-On the VPS, set BATAM_DOMAIN for the Lark callback check, Nginx and TLS.
-Set BATAM_CERTBOT_EMAIL when creating a new Certbot account.
+Domain: ba8.nexhubco.vn. Configure Nginx and HTTPS once outside deployment;
+see deploy/nginx-batam.conf.example and deploy/README.md.
 EOF
 }
 
@@ -84,12 +80,7 @@ validate_config() {
   [[ $BRANCH =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ && $BRANCH != *..* ]] || die "Invalid BATAM_GIT_BRANCH"
   if [[ ! $PORT =~ ^[0-9]+$ ]] || (( PORT < 1024 || PORT > 64535 )); then die "BATAM_PORT must be 1024..64535"; fi
   if [[ ! $KEEP_RELEASES =~ ^[0-9]+$ ]] || (( KEEP_RELEASES < 2 )); then die "BATAM_KEEP_RELEASES must be at least 2"; fi
-  if [[ -n ${BATAM_DOMAIN:-} ]]; then
-    [[ $BATAM_DOMAIN =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]] || die "Invalid BATAM_DOMAIN"
-  fi
-  if [[ -n ${BATAM_CERTBOT_EMAIL:-} ]]; then
-    [[ $BATAM_CERTBOT_EMAIL =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]] || die "Invalid BATAM_CERTBOT_EMAIL"
-  fi
+
 }
 
 release_path() {
@@ -139,8 +130,7 @@ load_env() {
         [[ -n ${!key:-} ]] || { printf 'Missing %s in BATAM_ENV_SOURCE\n' "$key" >&2; exit 1; }
         printf '%s=%q\n' "$key" "${!key}"
       done
-      [[ -n ${BATAM_DOMAIN:-} ]] || { printf 'BATAM_DOMAIN is required when importing an env file\n' >&2; exit 1; }
-      printf 'LARK_REDIRECT_URI=%q\n' "https://${BATAM_DOMAIN}/auth/callback"
+      printf 'LARK_REDIRECT_URI=%q\n' "https://ba8.nexhubco.vn/auth/callback"
       for key in GOOGLE_APPLICATION_CREDENTIALS LARK_BASE_URL CRON_SECRET LARK_WEBHOOK_URL; do
         if [[ -n ${!key:-} ]]; then printf '%s=%q\n' "$key" "${!key}"; fi
       done
@@ -160,8 +150,7 @@ load_env() {
     [[ -n ${!key:-} ]] || die "Missing $key in $ENV_FILE"
   done
   if [[ $PM == systemd ]]; then
-    [[ -n ${BATAM_DOMAIN:-} ]] || die "Set BATAM_DOMAIN to Batam's public hostname"
-    [[ $LARK_REDIRECT_URI == "https://${BATAM_DOMAIN}/auth/callback" ]] || die "LARK_REDIRECT_URI must equal https://${BATAM_DOMAIN}/auth/callback"
+    [[ $LARK_REDIRECT_URI == "https://ba8.nexhubco.vn/auth/callback" ]] || die "LARK_REDIRECT_URI must equal https://ba8.nexhubco.vn/auth/callback"
   fi
 }
 
@@ -266,53 +255,6 @@ migrate_legacy_service() {
   systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
   rm -f "$SYSTEMD_DIR/$LEGACY_SERVICE.service"
   systemctl daemon-reload
-}
-
-https_healthy() {
-  curl --fail --silent --max-time 10 --noproxy '*' \
-    --resolve "$BATAM_DOMAIN:443:127.0.0.1" "https://$BATAM_DOMAIN/api/health" \
-    | grep -q '"status":"ok"'
-}
-
-configure_web() {
-  [[ $PM == systemd ]] || return 0
-  [[ -n ${BATAM_DOMAIN:-} ]] || die "Set BATAM_DOMAIN before configuring Nginx"
-  for tool in nginx certbot curl; do require_command "$tool"; done
-  [[ -d $NGINX_AVAILABLE && -d $NGINX_ENABLED ]] || die "Nginx site directories are missing"
-  local template="$1/deploy/nginx.conf.template" site="$NGINX_AVAILABLE/$NGINX_SITE"
-  local enabled="$NGINX_ENABLED/$NGINX_SITE" temporary
-  [[ -f $template ]] || die "Nginx template is missing: $template"
-  if [[ ! -e $site ]]; then
-    temporary="$(mktemp "$NGINX_AVAILABLE/$NGINX_SITE.tmp.XXXXXXXX")"
-    sed -e "s|__DOMAIN__|$BATAM_DOMAIN|g" -e "s|__PORT__|$PORT|g" "$template" > "$temporary"
-    chmod 644 "$temporary"
-    mv "$temporary" "$site"
-    log "Created Nginx site for $BATAM_DOMAIN"
-  fi
-  if ! grep -Eq "^[[:space:]]*server_name[[:space:]]+$BATAM_DOMAIN;" "$site"; then
-    printf 'Existing Nginx site %s does not serve %s\n' "$site" "$BATAM_DOMAIN" >&2
-    return 1
-  fi
-  if ! grep -Fq "proxy_pass http://127.0.0.1:$PORT;" "$site"; then
-    printf 'Existing Nginx site %s does not proxy to port %s\n' "$site" "$PORT" >&2
-    return 1
-  fi
-  if [[ -e $enabled && ! -L $enabled ]]; then
-    printf 'Nginx enabled path is not a symlink: %s\n' "$enabled" >&2
-    return 1
-  fi
-  ln -sfn "$site" "$enabled"
-  nginx -t && systemctl reload nginx || return 1
-  if https_healthy; then
-    log "HTTPS certificate is valid for $BATAM_DOMAIN"
-    return 0
-  fi
-  local options=(--nginx --non-interactive --agree-tos --redirect -d "$BATAM_DOMAIN")
-  if [[ -n ${BATAM_CERTBOT_EMAIL:-} ]]; then options+=(-m "$BATAM_CERTBOT_EMAIL"); fi
-  log "Issuing HTTPS certificate for $BATAM_DOMAIN"
-  certbot "${options[@]}" || return 1
-  nginx -t && systemctl reload nginx && https_healthy || return 1
-  log "HTTPS healthy at https://$BATAM_DOMAIN/api/health"
 }
 
 stop_test() {
@@ -427,9 +369,6 @@ deploy() {
   if [[ -n $previous ]]; then ln -sfn "$previous" "$PREVIOUS_LINK"; fi
   record deploy "$release_id" "${previous##*/}"
   cleanup_releases
-  if ! configure_web "$release"; then
-    die "App is healthy, but HTTPS setup failed; inspect Nginx/Certbot and run --configure-web"
-  fi
   setup_cron "$release" || die "App is healthy, but cron setup failed; fix configuration and run --setup-cron"
   log "Deployed $release_id ($commit) at $HEALTH_URL"
 }
@@ -466,17 +405,6 @@ rollback() {
   log "Rolled back to ${target##*/}"
 }
 
-configure_current_web() {
-  require_root
-  [[ $PM == systemd ]] || die "Nginx configuration is available on systemd hosts only"
-  local release
-  release="$(release_path "$CURRENT_LINK")"
-  [[ -n $release ]] || die "No active release to configure"
-  acquire_lock
-  health_check "$PORT" 1 || die "Batam service is not healthy at $HEALTH_URL"
-  configure_web "$release" || die "HTTPS setup failed; inspect Nginx/Certbot"
-}
-
 status() {
   printf 'Current: %s\n' "$(release_path "$CURRENT_LINK")"
   printf 'Previous: %s\n' "$(release_path "$PREVIOUS_LINK")"
@@ -509,7 +437,6 @@ case "${1:-}" in
   --status) status ;;
   --history) if [[ -f $APP_DIR/.deploy_history ]]; then tail -n 20 "$APP_DIR/.deploy_history"; else printf 'No deployment history\n'; fi ;;
   --logs) logs ;;
-  --configure-web) configure_current_web ;;
   --setup-cron) configure_current_cron ;;
   -h|--help|help) usage ;;
   *) die "Unknown option: $1" ;;

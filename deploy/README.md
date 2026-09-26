@@ -1,55 +1,66 @@
 # Deploy Batam
 
-Batam dùng `deploy/deploy.sh` để phát hành commit từ `origin/main`. Mỗi bản được build trong `releases/` và kiểm tra tại cổng tạm trước khi chuyển symlink `current`. Systemd service `batam` chạy trên `127.0.0.1:3105`. Nginx site vẫn tên `batam-dashboard`. Khi nâng cấp từ bản cũ, script dừng và gỡ unit `batam-dashboard`, sau đó tạo và bật unit `batam`. Trên VPS, script tự tạo Nginx site lần đầu, cấp HTTPS bằng Certbot nếu cần và kiểm tra chứng chỉ. Lần restart service có thể gây gián đoạn ngắn.
+Batam dùng `deploy/deploy.sh` để build commit từ `origin/main` trong `releases/`, kiểm tra health rồi chuyển symlink `current` và restart systemd service `batam` trên `127.0.0.1:3105`. Script tự cài cron sau deploy và đồng bộ cron khi rollback. Lần restart có thể gây gián đoạn ngắn.
 
-## Chuẩn bị VPS (một lần)
+Domain cố định là **ba8.nexhubco.vn**, tương tự cách cấu hình Monarch. Nginx và HTTPS cài riêng một lần; deploy không tạo/sửa Nginx hoặc gọi Certbot. Không cần biến `BATAM_DOMAIN` hoặc `BATAM_CERTBOT_EMAIL`; có thể xóa các biến cũ khỏi env. Lệnh `--configure-web` được thay bằng quy trình cấu hình thủ công bên dưới.
 
-1. Cài Node.js 20.19+ (hoặc 22.13+/24+), Yarn 1, Git, Nginx, Certbot Nginx plugin, systemd, curl và `ss`. Tạo user `www-data` nếu máy chưa có. Cho VPS quyền đọc Git repository `https://github.com/nexhuber/batam.git` hoặc đặt `BATAM_GIT_URL`.
-2. Cho DNS của `ba8.nexhubco.vn` trỏ về VPS, mở cổng 80/443, rồi đăng ký chính xác `https://ba8.nexhubco.vn/auth/callback` trong Lark Custom App.
-3. Tạo `/var/www/html/batam/.env` trên VPS với `SESSION_SECRET`, `LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_REDIRECT_URI`, `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION`, `MONARCH_API_BASE_URL` và `BRAND_PIVOT_API_TOKEN`. File này nằm ngoài `releases/`, có quyền `600`. Nếu chưa có file, có thể truyền `BATAM_ENV_SOURCE=/path/to/trusted.env` trong lần deploy đầu; script chỉ nhập các biến Batam và đặt callback theo `BATAM_DOMAIN`.
-4. Nếu dùng `GOOGLE_APPLICATION_CREDENTIALS=./credentials/<file>.json`, đặt JSON tại `/var/www/html/batam/credentials/<file>.json`. Script chép file vào từng release với quyền hạn chế để `www-data` đọc. Đường dẫn tuyệt đối ngoài `releases/` cũng được hỗ trợ nếu `www-data` đọc được. Có thể để trống khi VPS đã có Application Default Credentials.
-5. Đặt `BATAM_DOMAIN=ba8.nexhubco.vn` khi deploy. Script tạo `/etc/nginx/sites-available/batam-dashboard` nếu chưa có, bật site, chạy `nginx -t`, reload và gọi Certbot khi chứng chỉ HTTPS chưa hợp lệ. Tên site Nginx độc lập với tên systemd service. Nếu Certbot chưa có tài khoản, truyền thêm `BATAM_CERTBOT_EMAIL=you@example.com`. Site đã được Certbot chỉnh TLS sẽ được giữ lại ở các lần deploy sau. Nếu site Batam có sẵn nhưng khác domain/cổng, script dừng và báo đường dẫn cần kiểm tra, tránh ghi đè cấu hình đang chạy.
+## Chuẩn bị VPS
+
+1. Cài Node.js 20.19+ (hoặc 22.13+/24+), Yarn 1, Git, systemd, curl, `ss`, cron và user `www-data`. Cho VPS quyền đọc repository `https://github.com/nexhuber/batam.git`.
+2. Tạo `/var/www/html/batam/.env` với các biến trong `.env.example`; đặt `LARK_REDIRECT_URI=https://ba8.nexhubco.vn/auth/callback` và đăng ký đúng URL đó trong Lark console. Env có quyền `600`, nằm ngoài releases.
+3. Có thể dùng `BATAM_ENV_SOURCE=/path/to/trusted.env` để nhập cấu hình lần đầu; script đặt callback Batam cố định, không sao chép callback của app nguồn.
+4. Nếu dùng `GOOGLE_APPLICATION_CREDENTIALS=./credentials/<file>.json`, đặt JSON trong `/var/www/html/batam/credentials/`. Script chép vào release để `www-data` đọc được. Đường dẫn tuyệt đối ngoài releases hoặc ADC cũng được hỗ trợ.
 
 ## Deploy lần đầu và các lần sau
 
-Khi đổi tên service từ `batam-dashboard` sang `batam`, trước tiên đưa thay đổi lên `origin/main`. Trên VPS, cập nhật checkout chứa script deploy rồi chạy script mới. Nếu checkout là `/var/www/html/batam/source`:
+Từ checkout đã pull code mới:
+
+```bash
+sudo bash deploy/deploy.sh
+```
+
+Nếu checkout ở thư mục `source`:
 
 ```bash
 cd /var/www/html/batam/source
 sudo git pull --ff-only origin main
-sudo BATAM_DOMAIN='ba8.nexhubco.vn' bash deploy/deploy.sh
+sudo bash deploy/deploy.sh
 ```
 
-Nếu Git checkout nằm trực tiếp ở `/var/www/html/batam`, chạy `git pull` tại thư mục đó rồi chạy `sudo BATAM_DOMAIN='ba8.nexhubco.vn' bash deploy/deploy.sh`. Script sẽ dừng và disable unit cũ, cài `batam.service`, rồi deploy release mới. Sau deploy xác nhận bằng `sudo systemctl status batam --no-pager` và `sudo journalctl -u batam -n 100 --no-pager`.
-
-Nếu VPS chưa có checkout, clone repo trên VPS rồi deploy (sau khi đã tạo `.env` như trên):
+Nếu chưa có repository, clone trước:
 
 ```bash
-ssh user@vps
 sudo mkdir -p /var/www/html/batam
 sudo git clone https://github.com/nexhuber/batam.git /var/www/html/batam/source
-sudo BATAM_DOMAIN='ba8.nexhubco.vn' bash /var/www/html/batam/source/deploy/deploy.sh
+sudo bash /var/www/html/batam/source/deploy/deploy.sh
 ```
 
-Nếu repo đã nằm ngay tại `/var/www/html/batam`, chạy script tại đó thay cho đường dẫn `source`. Mỗi lần deploy chỉ `fetch` và `archive` commit từ `origin/main`; không reset checkout hoặc lấy thay đổi chưa commit.
+Script chỉ lấy commit từ `origin/main`, không lấy thay đổi chưa commit. Khi nâng cấp từ service `batam-dashboard`, script tự dừng/gỡ unit cũ và cài service `batam`. Tên site Nginx vẫn là `batam-dashboard`.
 
 ```bash
-sudo BATAM_DOMAIN='ba8.nexhubco.vn' bash /var/www/html/batam/current/deploy/deploy.sh
-bash /var/www/html/batam/current/deploy/deploy.sh --status
-bash /var/www/html/batam/current/deploy/deploy.sh --history
-bash /var/www/html/batam/current/deploy/deploy.sh --logs
-sudo BATAM_DOMAIN='ba8.nexhubco.vn' bash /var/www/html/batam/current/deploy/deploy.sh --rollback
+sudo bash /var/www/html/batam/current/deploy/deploy.sh --rollback
+sudo bash /var/www/html/batam/current/deploy/deploy.sh --status
+sudo bash /var/www/html/batam/current/deploy/deploy.sh --history
+sudo bash /var/www/html/batam/current/deploy/deploy.sh --logs
 ```
 
-`BATAM_APP_DIR` mặc định `/var/www/html/batam` trên Linux, `BATAM_PORT=3105`, `BATAM_GIT_BRANCH=main` và `BATAM_KEEP_RELEASES=5`. `--rollback` dùng release khỏe mạnh ngay trước đó và kiểm tra lại health. Script giữ cả release hiện tại lẫn release rollback khi dọn bản cũ. Nếu dùng đường dẫn `.env` khác, đặt `BATAM_ENV_FILE` nhất quán khi deploy; systemd unit sẽ trỏ tới file đó.
+Mặc định: `BATAM_APP_DIR=/var/www/html/batam`, `BATAM_PORT=3105`, `BATAM_GIT_BRANCH=main`, `BATAM_KEEP_RELEASES=5`. Nếu đổi `BATAM_ENV_FILE`, truyền cùng giá trị đó khi deploy/cài cron. Nếu đổi port, sửa `proxy_pass` trong Nginx tương ứng. Rollback phục hồi release khỏe mạnh trước đó và kiểm tra health.
 
-Nếu ứng dụng đã chạy nhưng HTTPS đang trả chứng chỉ của domain khác, cập nhật script trên VPS rồi chạy riêng:
+## Nginx và HTTPS — cấu hình một lần
+
+**Nếu HTTPS của Batam đang chạy bình thường thì bỏ qua bước này.** Giữ nguyên site đã được Certbot cấu hình, không chép đè bằng file HTTP mẫu.
+
+Với VPS chưa có site: cài Nginx và Certbot Nginx plugin, trỏ DNS `ba8.nexhubco.vn` về VPS và mở cổng 80/443. Sau khi app đã chạy, từ checkout:
 
 ```bash
-sudo BATAM_DOMAIN='ba8.nexhubco.vn' bash /var/www/html/batam/source/deploy/deploy.sh --configure-web
+sudo cp -n deploy/nginx-batam.conf.example /etc/nginx/sites-available/batam-dashboard
+sudo ln -s /etc/nginx/sites-available/batam-dashboard /etc/nginx/sites-enabled/batam-dashboard
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d ba8.nexhubco.vn
 ```
 
-Lệnh này kiểm tra service ở cổng 3105, cấu hình Nginx/Certbot và xác thực chứng chỉ qua HTTPS mà không build lại ứng dụng. Nếu build trước đó chưa tạo `current`, chạy deploy bình thường trước.
+Nếu site hoặc symlink đã tồn tại, kiểm tra cấu hình đang dùng thay vì tạo site thứ hai. File mẫu đặt `server_name ba8.nexhubco.vn` và proxy về `127.0.0.1:3105`. Certbot bổ sung HTTPS vào file trên VPS; deploy sau đó giữ nguyên file này. Việc gia hạn chứng chỉ do lịch Certbot trên VPS đảm nhiệm, không phụ thuộc deploy app.
 
 ## Chạy bằng nohup trên máy local
 
