@@ -21,7 +21,9 @@ REPO_URL="${BATAM_GIT_URL:-https://github.com/nexhuber/batam.git}"
 BRANCH="${BATAM_GIT_BRANCH:-main}"
 PORT="${BATAM_PORT:-3105}"
 KEEP_RELEASES="${BATAM_KEEP_RELEASES:-5}"
-SERVICE=batam-dashboard
+SERVICE=batam
+LEGACY_SERVICE=batam-dashboard
+NGINX_SITE=batam-dashboard
 RELEASES_DIR="$APP_DIR/releases"
 CURRENT_LINK="$APP_DIR/current"
 PREVIOUS_LINK="$APP_DIR/previous"
@@ -249,9 +251,19 @@ install_service() {
   sudo -u www-data "$node_bin" --version >/dev/null || die "Node.js is not executable by www-data"
   sed -e "s|__APP_DIR__|$APP_DIR|g" -e "s|__ENV_FILE__|$ENV_FILE|g" \
       -e "s|__PORT__|$PORT|g" -e "s|__NODE_BIN__|$node_bin|g" \
-      "$1/deploy/batam-dashboard.service.template" > "$SYSTEMD_DIR/$SERVICE.service"
+      "$1/deploy/$SERVICE.service.template" > "$SYSTEMD_DIR/$SERVICE.service"
   systemctl daemon-reload
   systemctl enable "$SERVICE"
+}
+
+migrate_legacy_service() {
+  [[ $PM == systemd ]] || return 0
+  # Stop/remove the previous Batam unit before checking port ownership. The
+  # Nginx site name stays unchanged, so this migration only renames systemd.
+  systemctl stop "$LEGACY_SERVICE" 2>/dev/null || true
+  systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
+  rm -f "$SYSTEMD_DIR/$LEGACY_SERVICE.service"
+  systemctl daemon-reload
 }
 
 https_healthy() {
@@ -265,11 +277,11 @@ configure_web() {
   [[ -n ${BATAM_DOMAIN:-} ]] || die "Set BATAM_DOMAIN before configuring Nginx"
   for tool in nginx certbot curl; do require_command "$tool"; done
   [[ -d $NGINX_AVAILABLE && -d $NGINX_ENABLED ]] || die "Nginx site directories are missing"
-  local template="$1/deploy/nginx.conf.template" site="$NGINX_AVAILABLE/$SERVICE"
-  local enabled="$NGINX_ENABLED/$SERVICE" temporary
+  local template="$1/deploy/nginx.conf.template" site="$NGINX_AVAILABLE/$NGINX_SITE"
+  local enabled="$NGINX_ENABLED/$NGINX_SITE" temporary
   [[ -f $template ]] || die "Nginx template is missing: $template"
   if [[ ! -e $site ]]; then
-    temporary="$(mktemp "$NGINX_AVAILABLE/$SERVICE.tmp.XXXXXXXX")"
+    temporary="$(mktemp "$NGINX_AVAILABLE/$NGINX_SITE.tmp.XXXXXXXX")"
     sed -e "s|__DOMAIN__|$BATAM_DOMAIN|g" -e "s|__PORT__|$PORT|g" "$template" > "$temporary"
     chmod 644 "$temporary"
     mv "$temporary" "$site"
@@ -356,7 +368,7 @@ deploy() {
   commit="$(git -C "$repo" rev-parse --verify 'FETCH_HEAD^{commit}')"
   STAGE="$(mktemp -d "${TMPDIR:-/tmp}/batam-git.XXXXXXXX")"
   git -C "$repo" archive "$commit" | tar -x -C "$STAGE"
-  [[ -f $STAGE/yarn.lock && -f $STAGE/deploy/batam-dashboard.service.template ]] || die "Fetched commit lacks deployment files"
+  [[ -f $STAGE/yarn.lock && -f $STAGE/deploy/$SERVICE.service.template ]] || die "Fetched commit lacks deployment files"
   release="$(mktemp -d "$RELEASES_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${commit:0:8}.XXXXXX")"
   release_id="${release##*/}"
   cp -R "$STAGE/." "$release/"
@@ -372,6 +384,7 @@ deploy() {
   fi
   preflight_release "$release"
   previous="$(release_path "$CURRENT_LINK")"
+  migrate_legacy_service
   if port_in_use "$PORT" && ! service_running; then die "Port $PORT belongs to another process"; fi
   install_service "$release"
   log "Switching to $release_id"

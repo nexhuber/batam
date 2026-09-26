@@ -1,5 +1,5 @@
 [Unit]
-Description=Batam Dashboard
+Description=Batam
 After=network-online.target
 Wants=network-online.target
 
@@ -18,7 +18,7 @@ RestartSec=5
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=batam-dashboard
+SyslogIdentifier=batam
 NoNewPrivileges=true
 PrivateTmp=true
 
