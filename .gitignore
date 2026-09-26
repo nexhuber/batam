@@ -17,3 +17,5 @@ previous
 .deploy_history
 .deploy.lock/
 .current-*
+
+.cron.log

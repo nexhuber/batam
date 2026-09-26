@@ -1,0 +1,8 @@
+[
+  {
+    "id": "weekly-brand-inventory",
+    "timezone": "Asia/Ho_Chi_Minh",
+    "schedule": "0 8 * * 1",
+    "utcSchedule": "0 1 * * 1"
+  }
+]

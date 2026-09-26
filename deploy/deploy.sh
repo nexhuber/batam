@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CRON_HELPER_FALLBACK="$(cd -P "$SCRIPT_DIR" && pwd)/cron.sh"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 if [[ ${PROJECT_DIR##*/} == current && -L $PROJECT_DIR ]]; then
   PROJECT_DIR="$(dirname "$PROJECT_DIR")"
@@ -47,6 +48,7 @@ Usage: deploy/deploy.sh [command]
   --status       Show release, process and health
   --history      Show recent deployment records
   --logs         Show deploy and service logs
+  --setup-cron   Synchronize Linux cron with the current release
   --configure-web  Configure Nginx and HTTPS for the current release
   -h, --help     Show this help
 
@@ -139,7 +141,7 @@ load_env() {
       done
       [[ -n ${BATAM_DOMAIN:-} ]] || { printf 'BATAM_DOMAIN is required when importing an env file\n' >&2; exit 1; }
       printf 'LARK_REDIRECT_URI=%q\n' "https://${BATAM_DOMAIN}/auth/callback"
-      for key in GOOGLE_APPLICATION_CREDENTIALS LARK_BASE_URL; do
+      for key in GOOGLE_APPLICATION_CREDENTIALS LARK_BASE_URL CRON_SECRET LARK_WEBHOOK_URL; do
         if [[ -n ${!key:-} ]]; then printf '%s=%q\n' "$key" "${!key}"; fi
       done
     ) > "$temporary"; then
@@ -353,6 +355,26 @@ cleanup_releases() {
   done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d | sort -r)
 }
 
+setup_cron() {
+  [[ $(uname) == Linux && $PM == systemd ]] || return 0
+  local release="$1" helper="$1/deploy/cron.sh"
+  # Older rollback releases do not contain the installer; use this version to remove the block.
+  [[ -f $helper ]] || helper="$CRON_HELPER_FALLBACK"
+  [[ -f $helper ]] || { log "Cron helper missing"; return 1; }
+  /bin/bash "$helper" "$APP_DIR" "$ENV_FILE" "$PORT" "$release"
+}
+
+configure_current_cron() {
+  require_root
+  [[ $(uname) == Linux && $PM == systemd ]] || die "Cron setup is available on Linux systemd hosts only"
+  acquire_lock
+  local release
+  release="$(release_path "$CURRENT_LINK")"
+  [[ -n $release ]] || die "No active release"
+  health_check "$PORT" 1 || die "Batam is not healthy"
+  setup_cron "$release" || die "Cron setup failed; app is unchanged"
+}
+
 deploy() {
   require_root
   for tool in git tar mktemp node yarn curl install; do require_command "$tool"; done
@@ -408,6 +430,7 @@ deploy() {
   if ! configure_web "$release"; then
     die "App is healthy, but HTTPS setup failed; inspect Nginx/Certbot and run --configure-web"
   fi
+  setup_cron "$release" || die "App is healthy, but cron setup failed; fix configuration and run --setup-cron"
   log "Deployed $release_id ($commit) at $HEALTH_URL"
 }
 
@@ -439,6 +462,7 @@ rollback() {
   fi
   ln -sfn "$before" "$PREVIOUS_LINK"
   record rollback "${target##*/}" "${before##*/}"
+  setup_cron "$target" || die "Rollback is healthy, but cron synchronization failed; run --setup-cron"
   log "Rolled back to ${target##*/}"
 }
 
@@ -467,6 +491,7 @@ status() {
 
 logs() {
   if [[ -f $APP_DIR/.deploy.log ]]; then tail -n 50 "$APP_DIR/.deploy.log"; fi
+  if [[ -f $APP_DIR/.cron.log ]]; then tail -n 50 "$APP_DIR/.cron.log"; fi
   if [[ $PM == systemd ]]; then
     journalctl -u "$SERVICE" -n 50 --no-pager
   elif [[ -f $APP_DIR/.service.log ]]; then
@@ -485,6 +510,7 @@ case "${1:-}" in
   --history) if [[ -f $APP_DIR/.deploy_history ]]; then tail -n 20 "$APP_DIR/.deploy_history"; else printf 'No deployment history\n'; fi ;;
   --logs) logs ;;
   --configure-web) configure_current_web ;;
+  --setup-cron) configure_current_cron ;;
   -h|--help|help) usage ;;
   *) die "Unknown option: $1" ;;
 esac

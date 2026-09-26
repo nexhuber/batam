@@ -82,8 +82,25 @@ const { news, created } = await storeNews({
 yarn news:weekly
 ```
 
-`storeNews` trả lại bản ghi cũ với `created: false` khi cron chạy lại cùng `newsType` và `periodKey`. Mỗi news mới có UUID, thời điểm tạo UTC và `is_hide=false`. Function chỉ chạy trên server; repo hiện chưa có cron để gọi tự động. BigQuery không thực thi ràng buộc unique, nên cron không nên chạy đồng thời với nhiều cấu hình ghi khác nhau cho cùng khóa kỳ.
+`storeNews` trả lại bản ghi cũ với `created: false` khi cron chạy lại cùng `newsType` và `periodKey`. Mỗi news mới có UUID, thời điểm tạo UTC và `is_hide=false`. Function chỉ chạy trên server; Linux cron gọi job tự động theo lịch bên dưới. BigQuery không thực thi ràng buộc unique, nên cron không nên chạy đồng thời với nhiều cấu hình ghi khác nhau cho cùng khóa kỳ.
 
 ## Deploy
 
 Nginx, systemd và script deploy VPS nằm trong [deploy/README.md](deploy/README.md). Batam dùng một service và cổng riêng, mặc định `127.0.0.1:3105`.
+
+## Cron bản tin tồn kho
+
+Linux cron trên VPS gọi `POST /api/cron/weekly-brand-inventory` lúc **08:00 GMT+7 mỗi thứ Hai**. API dùng `Authorization: Bearer <CRON_SECRET>`, không dùng phiên đăng nhập Lark. Secret thiếu trả 503, token thiếu/sai trả 401, job không có trả 404, cùng job đang chạy trả 409, xử lý lỗi trả 500. Response thành công có `jobId`, `newsId`, `periodKey`, `created`, `attempts`, `durationMs`.
+
+Job lấy hai Chủ nhật gần nhất bằng helper hiện có, lưu news rồi gửi toàn bộ nội dung đã lưu qua `LARK_WEBHOOK_URL` dạng text (Markdown là văn bản, không phải bảng tương tác của Lark). Ví dụ ngày 28/09/2026 so sánh 27/09 và 20/09. Thiếu snapshot hoặc lỗi lưu news thì không gửi. News cùng kỳ đã có được giữ nguyên và vẫn gửi lại.
+
+Webhook có tối đa **3 lần gọi**, chờ 2 giây rồi 5 giây giữa các lần lỗi; mỗi lần timeout 30 giây. Chỉ bước gửi được retry, không tạo lại news. Hết lượt thì job báo lỗi và giữ news đã lưu. Không lưu trạng thái gửi: chạy lại hoặc timeout sau khi Lark đã nhận có thể gây tin nhắn trùng. Không tự chạy bù lịch bị bỏ lỡ. Giả định một VPS, một process app; khóa trong bộ nhớ chặn chạy đồng thời cùng job và tự giải phóng khi job kết thúc.
+
+`yarn news:weekly` vẫn chỉ tạo/lưu news, không gửi Lark. Cách cài lịch, chạy toàn bộ job thủ công và xem log: [hướng dẫn deploy](deploy/README.md#linux-cron).
+
+### Thêm job mới
+
+1. Viết handler trong `src/lib/cron/jobs/`, trả về các thông tin kết quả có thể ghi log (không chứa secrets).
+2. Đăng ký handler theo ID trong `src/lib/cron/registry.ts`.
+3. Thêm cùng ID vào `src/lib/cron/schedules.json`: `timezone: "Asia/Ho_Chi_Minh"`, `schedule` là lịch giờ Việt Nam và `utcSchedule` là lịch UTC tương đương (nhớ đổi cả thứ/ngày khi qua nửa đêm). Registry này là nguồn lịch dùng chung cho app và installer.
+4. Thêm test rồi deploy hoặc chạy `--setup-cron`. API và runner tự dùng job mới; không cần thêm route.

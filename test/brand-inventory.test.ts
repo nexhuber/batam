@@ -32,6 +32,18 @@ describe("Brand inventory report in Batam", () => {
     else process.env.BRAND_PIVOT_API_TOKEN = originalToken;
   });
 
+  it.each([
+    ["2026-09-28T01:00:00Z", "2026-09-27", "2026-09-20"],
+    ["2026-02-02T01:00:00Z", "2026-02-01", "2026-01-25"],
+    ["2027-01-04T01:00:00Z", "2027-01-03", "2026-12-27"],
+    ["2026-09-26T18:00:00Z", "2026-09-27", "2026-09-20"],
+  ])("selects Vietnam Sundays at %s", async (now, current, previous) => {
+    vi.setSystemTime(new Date(now));
+    fetchMock.mockResolvedValue(Response.json({ current_snapshot: current, previous_snapshot: previous, rows: [] }));
+    const data = await getWeeklyBrandInventoryData();
+    expect([data.current_snapshot, data.previous_snapshot]).toEqual([current, previous]);
+  });
+
   it("requests two explicit snapshots and passes the period", async () => {
     fetchMock.mockResolvedValue(Response.json({
       current_snapshot: "2026-09-20",

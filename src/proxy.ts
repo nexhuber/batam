@@ -3,7 +3,7 @@ import { readSession, SESSION_COOKIE } from "@/lib/session";
 
 export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  if (pathname === "/login" || pathname.startsWith("/auth/") || pathname === "/api/health" || pathname === "/api/news") {
+  if (pathname === "/login" || pathname.startsWith("/auth/") || pathname === "/api/health" || pathname === "/api/news" || pathname.startsWith("/api/cron/")) {
     return NextResponse.next();
   }
 

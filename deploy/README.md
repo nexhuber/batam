@@ -64,4 +64,51 @@ curl -fsS http://127.0.0.1:3105/api/health
 curl -fsS https://ba8.nexhubco.vn/api/health
 ```
 
-Health check chỉ xác nhận Next.js chạy. Kiểm tra thêm đăng nhập Lark, truy vấn BigQuery và API Monarch trên giao diện. Script không tạo cron cho `news:weekly`.
+Health check chỉ xác nhận Next.js chạy. Kiểm tra thêm đăng nhập Lark, truy vấn BigQuery và API Monarch trên giao diện. Script cài Linux cron gọi API job riêng; `news:weekly` vẫn chỉ tạo/lưu news.
+
+## Linux cron
+
+Thêm vào env VPS (giữ quyền `600`, không commit):
+
+```dotenv
+CRON_SECRET=<secret riêng tạo bằng openssl rand -hex 32>
+LARK_WEBHOOK_URL=<URL webhook Lark custom bot>
+```
+
+`BATAM_ENV_SOURCE` cũng nhập hai biến này nếu có. Chạy cron cần các cấu hình Monarch và BigQuery đang dùng, cùng bảng `news_history` đã tạo; không có migration mới. Lark bot phải chấp nhận text webhook với cấu hình bảo mật của bot hiện tại.
+
+VPS cần `crontab`, daemon `cron` hoặc `crond` đang active, `curl` hỗ trợ `--fail-with-body`, Node và systemd. Installer kiểm tra timezone process daemon (biến `TZ` nếu có), hoặc timezone hệ thống với `timedatectl` và `/etc/timezone`. Nếu hai cấu hình hệ thống không khớp, không xác định được hoặc timezone không hỗ trợ thì dừng cài lịch và giữ crontab cũ. Script không đổi timezone hay cài/bật daemon thay quản trị viên. Nếu crontab hiện có `CRON_TZ`, installer dừng để tránh kế thừa timezone khác từ cron cũ; cần xử lý override đó trước.
+
+- Daemon UTC (kể cả alias Etc/UTC, GMT, Etc/GMT): `0 1 * * 1`.
+- Daemon Asia/Ho_Chi_Minh: `0 8 * * 1`.
+
+Cả hai đều là 08:00 GMT+7 thứ Hai. Sau khi thay timezone máy/daemon, cần restart cron phù hợp và chạy lại installer. Không dùng biến `TZ` trong crontab để giả định đổi giờ lập lịch.
+
+Deploy khỏe mạnh tự cài block `# BEGIN BATAM CRON` đến `# END BATAM CRON` trong crontab root, giữ các lịch khác. Nếu cài cron thất bại, app vẫn hoạt động nhưng deploy báo lỗi rõ; sửa cấu hình rồi chạy riêng:
+
+```bash
+sudo bash /var/www/html/batam/current/deploy/deploy.sh --setup-cron
+sudo crontab -l
+sudo systemctl status cron --no-pager  # dùng crond nếu distro chạy crond
+```
+
+Cron gọi wrapper ở `current/deploy/run-cron.sh`, đọc secret từ env; secret không nằm trong crontab hoặc đối số curl. Wrapper gọi app trực tiếp ở loopback, timeout kết nối 10 giây, timeout request 900 giây, không retry cả request. Vượt 900 giây không đảm bảo tác vụ trong app đã dừng: xem log trước khi chạy lại. App chỉ retry phần webhook.
+
+Rollback đồng bộ lịch với release phục hồi; rollback về bản chưa có cron sẽ gỡ block Batam. Installer chỉ chạy khi dùng Linux/systemd; không tự cài trên macOS hoặc chế độ nohup. Nếu đổi `BATAM_ENV_FILE`, tiếp tục truyền cùng giá trị đó khi cài lại cron.
+
+Chạy thủ công **có ghi BigQuery và gửi Lark thật**:
+
+```bash
+sudo bash /var/www/html/batam/current/deploy/run-cron.sh \
+  /var/www/html/batam /var/www/html/batam/.env 3105 weekly-brand-inventory
+```
+
+Job chạy lại cùng kỳ vẫn gửi lại news cũ. Không lưu trạng thái giao tin, không tự chạy bù khi VPS tắt lúc lịch chạy.
+
+```bash
+sudo tail -n 100 /var/www/html/batam/.cron.log
+sudo journalctl -u batam -n 100 --no-pager
+sudo bash /var/www/html/batam/current/deploy/deploy.sh --logs
+```
+
+Log wrapper nằm ngoài release nên tồn tại qua deploy/rollback; cấu hình logrotate theo vận hành VPS nếu cần. Log app ghi job, thời gian chạy, kết quả và từng lần gửi thất bại, không ghi secret/webhook URL. `/api/health` chỉ xác nhận app hoạt động, không chứng minh cron, Monarch, BigQuery hay Lark đã chạy thành công.

@@ -4,6 +4,27 @@ import type { LarkUser } from "@/lib/session";
 type LarkResponse<T> = { code: number; msg?: string; data?: T };
 const baseUrl = process.env.LARK_BASE_URL || "https://open.larksuite.com";
 
+/** Send a plain-text message to the configured Lark custom bot webhook. */
+export async function sendLarkWebhook(message: string): Promise<void> {
+  const webhookUrl = process.env.LARK_WEBHOOK_URL;
+  if (!webhookUrl) throw new Error("LARK_WEBHOOK_URL is not configured");
+  if (!message.trim()) throw new Error("Lark webhook message must not be empty");
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ msg_type: "text", content: { text: message } }),
+    signal: AbortSignal.timeout(30_000),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Lark webhook HTTP ${response.status}`);
+
+  const result = (await response.json()) as { code?: number; msg?: string };
+  if (result.code !== 0) {
+    throw new Error(`Lark webhook error ${result.code ?? "unknown"}: ${result.msg || "unknown error"}`);
+  }
+}
+
 async function requestLark<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, { ...init, cache: "no-store" });
   if (!response.ok) throw new Error(`Lark HTTP ${response.status}`);
