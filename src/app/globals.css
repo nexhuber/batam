@@ -119,10 +119,8 @@ body {
 }
 
 .news-preview {
-  display: -webkit-box;
+  max-height: 160px;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
 }
 
 .news-markdown {

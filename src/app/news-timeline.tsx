@@ -22,13 +22,8 @@ function newsTitle(news: News): string {
   return news.content.match(/^#{1,6}\s+(.+)$/m)?.[1]?.trim() || typeLabel(news.news_type);
 }
 
-function newsPreview(news: News): string {
-  return news.content
-    .replace(/^#{1,6}\s+.+$/m, "")
-    .replace(/^\|[\s:|-]+\|$/gm, "")
-    .replace(/[|*_`>#]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function newsPreviewContent(news: News): string {
+  return news.content.replace(/^#{1,6}\s+.+(?:\r?\n|$)/m, "").trim();
 }
 
 const dateFormat = new Intl.DateTimeFormat("vi-VN", {
@@ -195,15 +190,28 @@ export function NewsTimeline({ initialPage, types, initialError, userName }: Pro
                           {typeLabel(news.news_type)}
                         </span>
                         <h2 className="mt-4 text-lg font-semibold leading-snug text-slate-900">{newsTitle(news)}</h2>
-                        {!expanded && <p className="news-preview mt-3 text-sm leading-6 text-slate-600">{newsPreview(news)}</p>}
+                        {!expanded && (
+                          <div className="news-markdown news-preview mt-3" aria-label="Nội dung xem trước">
+                            <Markdown remarkPlugins={[remarkGfm]}>{newsPreviewContent(news)}</Markdown>
+                          </div>
+                        )}
                         <span className="mt-5 inline-flex text-xs font-semibold text-teal-700">
                           {expanded ? "Thu gọn ↑" : "Đọc toàn bộ ↓"}
                         </span>
                       </button>
                       {expanded && (
-                        <div id={`news-content-${news.id}`} className="news-markdown border-t border-slate-100 px-5 pb-6 pt-5 sm:px-6">
-                          <Markdown remarkPlugins={[remarkGfm]}>{news.content}</Markdown>
-                        </div>
+                        <>
+                          <div id={`news-content-${news.id}`} className="news-markdown border-t border-slate-100 px-5 pb-6 pt-5 sm:px-6">
+                            <Markdown remarkPlugins={[remarkGfm]}>{news.content}</Markdown>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedId(null)}
+                            className="mx-5 mb-5 inline-flex cursor-pointer text-xs font-semibold text-teal-700 hover:text-teal-900 sm:mx-6"
+                          >
+                            Thu gọn ↑
+                          </button>
+                        </>
                       )}
                     </article>
                   </div>

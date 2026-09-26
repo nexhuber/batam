@@ -47,13 +47,21 @@ test("renders alternating cards, Vietnam time and expandable Markdown table", ()
   expect(screen.getAllByText("21/09/2026")).toHaveLength(2);
   expect(screen.getAllByText("00:30")).toHaveLength(2);
 
+  const preview = cards[0].querySelector('[aria-label="Nội dung xem trước"]');
+  expect(preview?.querySelector("table")?.textContent).toContain("12");
+  expect(preview?.querySelector("th")?.textContent).toBe("Brand");
+
   const button = screen.getByRole("button", { name: /Bản tin one/ });
   expect(button.getAttribute("aria-expanded")).toBe("false");
   fireEvent.click(button);
   expect(button.getAttribute("aria-expanded")).toBe("true");
   expect(cards[0].querySelector("table")?.textContent).toContain("12");
-  fireEvent.click(button);
-  expect(cards[0].querySelector("table")).toBeNull();
+  expect(cards[0].querySelector('[aria-label="Nội dung xem trước"]')).toBeNull();
+  expect(screen.getByText("Bản tin one", { selector: "h1" })).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: "Thu gọn ↑" }));
+  expect(button.getAttribute("aria-expanded")).toBe("false");
+  expect(cards[0].querySelector("table")?.textContent).toContain("12");
+  expect(cards[0].querySelector('[aria-label="Nội dung xem trước"]')?.querySelector("table")).not.toBeNull();
 });
 
 test("filters on the server and appends a page without duplicate cards", async () => {
